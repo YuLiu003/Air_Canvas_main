@@ -1,5 +1,4 @@
 # Machine learning model and training files
-air_canvas_with_obj.py
 train_handwriting_model.py
 emnist_mapping.npy
 handwriting_model.h5

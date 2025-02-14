@@ -76,7 +76,7 @@ detector = htp.handDetector(detectionCon=0.85)
 # Define a Command class
 class Command:
     def __init__(self, action, **kwargs):
-        self.action = action  # 'draw' or 'clear'
+        self.action = action  # 'draw', 'clear', 'selection', or 'edit'
         self.kwargs = kwargs  # Additional arguments needed for the action
 
     def execute(self, canvas, marker_canvas):
@@ -97,6 +97,30 @@ class Command:
         elif self.action == 'clear':
             canvas.fill(0)
             marker_canvas.fill(0)
+        elif self.action == 'selection':
+            # For selection actions, we replace the canvas with the recorded after state.
+            canvas[:] = self.kwargs['after_canvas']
+            marker_canvas[:] = self.kwargs['after_marker']
+        elif self.action == 'edit':
+            # For whole canvas edit actions, replace the canvas with the recorded after state.
+            canvas[:] = self.kwargs['after_canvas']
+            marker_canvas[:] = self.kwargs['after_marker']
+    
+    # Add method to identify if commands are equivalent
+    def is_equivalent(self, other):
+        if not isinstance(other, Command):
+            return False
+        if self.action != other.action:
+            return False
+        if self.action not in ['edit', 'selection']:
+            return False
+            
+        # Compare before and after states for both canvases
+        before_equivalent = np.array_equal(self.kwargs.get('before_canvas'), 
+                                         other.kwargs.get('before_canvas'))
+        before_marker_equivalent = np.array_equal(self.kwargs.get('before_marker'), 
+                                                other.kwargs.get('before_marker'))
+        return before_equivalent and before_marker_equivalent
 
 # Canvas state management class
 class CanvasState:
@@ -150,6 +174,8 @@ class CanvasState:
         self.original_marker_canvas = None  # Add this line
         self.lasso_selection_marker = None  # Add this line
         self.selection_background_marker = None  # Add this line
+        self.undo_stack = []   # Stack for executed commands
+        self.redo_stack = []   # Stack for commands that have been undone
 
 state = CanvasState()
 
@@ -316,14 +342,9 @@ def handle_selection_mode(x1, y1):
                 elif action == "Clear":
                     clear_canvas()
                 elif action == "Undo":
-                    if state.command_index >= 0:
-                        state.command_index -= 1
-                        redraw_canvas()
+                    undo_action()
                 elif action == "Redo":
-                    if state.command_index < len(state.commands) - 1:
-                        state.command_index += 1
-                        state.commands[state.command_index].execute(imgCanvas, imgMarkerCanvas)
-
+                    redo_action()
                 elif action == "Pen":
                     state.current_tool = "Pen"
                     state.current_thickness = PEN_THICKNESS
@@ -367,18 +388,18 @@ def draw_on_canvas(imgCanvas, imgMarkerCanvas, x1, y1, xp, yp, drawColor, thickn
         color=drawColor,
         thickness=thickness,
         tool=state.current_tool
-    )    # Discard any commands beyond the current index
+    )
+    # Only trim future commands if we aren’t redoing an undone transformation.
     if state.command_index < len(state.commands) - 1:
         state.commands = state.commands[:state.command_index+1]
-        # Also remove any checkpoints beyond the current index
         state.checkpoints = {k: v for k, v in state.checkpoints.items() if k <= state.command_index}
-    # Append the new command
+        # For non-edit actions, clear the redo stack.
+        if command.action != 'edit':
+            state.redo_stack.clear()
     state.commands.append(command)
     state.command_index += 1
     command.execute(imgCanvas, imgMarkerCanvas)
-    # Save checkpoint if needed
-    if state.command_index % state.checkpoint_interval == 0:
-        state.checkpoints[state.command_index] = (imgCanvas.copy(), imgMarkerCanvas.copy())
+    state.undo_stack.append(command)
 
 def calculate_hand_span(lmlist):
     thumb_tip = lmlist[4][1:]
@@ -455,8 +476,8 @@ def clear_canvas(force=False):
             # Execute the clear action
             command.execute(imgCanvas, imgMarkerCanvas)
             # Save checkpoint if needed
-            if state.command_index % state.checkpoint_interval == 0:
-                state.checkpoints[state.command_index] = (imgCanvas.copy(), imgMarkerCanvas.copy())
+            state.undo_stack.append(command)
+            state.redo_stack.clear()
         app.exit()
     else:
         imgCanvas = np.zeros((WINDOW_HEIGHT, WINDOW_WIDTH, 3), np.uint8)
@@ -477,6 +498,55 @@ def redraw_canvas():
     for i in range(start_index, state.command_index + 1):
         state.commands[i].execute(imgCanvas, imgMarkerCanvas)
 
+def redraw_canvas_from_stack():
+    # Reset both canvases
+    imgCanvas[:] = np.zeros((WINDOW_HEIGHT, WINDOW_WIDTH, 3), np.uint8)
+    imgMarkerCanvas[:] = np.zeros((WINDOW_HEIGHT, WINDOW_WIDTH, 3), np.uint8)
+    # Reapply all commands remaining in the undo stack
+    for cmd in state.undo_stack:
+        cmd.execute(imgCanvas, imgMarkerCanvas)
+
+def undo_action():
+    if state.command_index >= 0:
+        # Push the undone command onto the redo stack
+        undone_command = state.commands[state.command_index]
+        state.redo_stack.append(undone_command)
+        state.command_index -= 1
+        redraw_canvas()
+    else:
+        print("Nothing to undo.")
+
+def redo_action():
+    if state.redo_stack:
+        redone_command = state.redo_stack.pop()
+        
+        # Handle transformation commands (both edit and selection)
+        if redone_command.action in ['edit', 'selection']:
+            # Restore the canvas states directly
+            imgCanvas[:] = redone_command.kwargs['after_canvas']
+            imgMarkerCanvas[:] = redone_command.kwargs['after_marker']
+            
+            # Add command back to the commands list
+            state.commands.append(redone_command)
+            state.command_index = len(state.commands) - 1
+            state.undo_stack.append(redone_command)
+            
+            # Don't clear redo stack here since we might have more transforms to redo
+        else:
+            # Handle non-transformation commands
+            if state.command_index < len(state.commands) - 1:
+                state.command_index += 1
+            else:
+                state.commands.append(redone_command)
+                state.command_index = len(state.commands) - 1
+            redraw_canvas()
+            
+    elif state.command_index < len(state.commands) - 1:
+        state.command_index += 1
+        redraw_canvas()
+    else:
+        print("Nothing to redo.")
+        
 # Add new helper function
 def reset_selection_state(state, canvas, marker_canvas):
     """Reset all selection-related states and finalize any active selection"""
@@ -642,34 +712,42 @@ while True:
                 state.is_edit_mode = True
                 state.current_mode = "Edit"
 
-                # Use the center of the hand for transformations
                 center_x = lmlist[9][1]
                 center_y = lmlist[9][2]
                 current_pos = np.array([center_x, center_y])
 
                 if state.edit_start_pos is None:
                     state.edit_start_pos = current_pos
+                    # Store initial state for both canvases
                     state.initial_canvas = imgCanvas.copy()
                     state.initial_marker_canvas = imgMarkerCanvas.copy()
                     state.edit_initial_distance = calculate_hand_span(lmlist)
+                    state.last_delta = None
+                    state.last_scale = 1.0
                 else:
-                    # Calculate movement
+                    # Calculate movement with smoothing
                     delta_pos = current_pos - state.edit_start_pos
-                    imgCanvas, imgMarkerCanvas = move_canvases(
-                        [state.initial_canvas, state.initial_marker_canvas],
-                        delta_pos[0],
-                        delta_pos[1]
-                    )
-                    # Calculate scaling
+                    if state.last_delta is not None:
+                        delta_pos = smooth_transform(state.last_delta, delta_pos, TRANSFORM_SMOOTHING)
+                    state.last_delta = delta_pos
+
+                    # Calculate scaling with smoothing
                     current_distance = calculate_hand_span(lmlist)
                     if state.edit_initial_distance != 0:
-                        scale_factor = current_distance / state.edit_initial_distance
-                        # Resize both canvases
-                        imgCanvas, imgMarkerCanvas = resize_canvases(
-                            [imgCanvas, imgMarkerCanvas],
-                            (center_x, center_y),
-                            scale_factor
-                        )
+                        scale = current_distance / state.edit_initial_distance
+                        scale = smooth_transform(state.last_scale, scale, TRANSFORM_SMOOTHING)
+                        state.last_scale = scale
+                    else:
+                        scale = 1.0
+
+                    # Move and scale both canvases
+                    moved_canvas = move_canvas(state.initial_canvas, int(delta_pos[0]), int(delta_pos[1]))
+                    moved_marker = move_canvas(state.initial_marker_canvas, int(delta_pos[0]), int(delta_pos[1]))
+
+                    # Apply scaling
+                    imgCanvas = resize_canvas(moved_canvas, (center_x, center_y), scale)
+                    imgMarkerCanvas = resize_canvas(moved_marker, (center_x, center_y), scale)
+
         else:
             # Reset edit mode state variables when not in "FiveFingers" gesture
             state.is_edit_mode = False
@@ -899,7 +977,29 @@ while True:
                     imgMarkerCanvas[:] = temp_marker_canvas
 
             elif not gesture == "Lasso" and state.has_active_selection:
-                # Reset selection state when switching to other gestures
+                # Record the selection transformation command before resetting selection state
+                before_canvas = state.original_canvas.copy() if state.original_canvas is not None else imgCanvas.copy()
+                before_marker = state.original_marker_canvas.copy() if state.original_marker_canvas is not None else imgMarkerCanvas.copy()
+                after_canvas = imgCanvas.copy()
+                after_marker = imgMarkerCanvas.copy()
+                
+                selection_command = Command(
+                    action='selection',
+                    before_canvas=before_canvas,
+                    before_marker=before_marker,
+                    after_canvas=after_canvas,
+                    after_marker=after_marker
+                )
+                
+                # Only clear redo stack if this isn't a continuation of a previous transform
+                if not any(cmd.is_equivalent(selection_command) for cmd in state.redo_stack):
+                    state.redo_stack.clear()
+                
+                state.commands.append(selection_command)
+                state.command_index += 1
+                state.undo_stack.append(selection_command)
+                
+                # Reset selection state after recording the command
                 imgCanvas, imgMarkerCanvas = reset_selection_state(state, imgCanvas, imgMarkerCanvas)
             else:
                 state.drawing = False
@@ -910,6 +1010,51 @@ while True:
             state.drawing = False
             state.xp, state.yp = 0, 0
             state.first_frame = True
+
+        # If a whole-canvas edit was in progress but the gesture has changed,
+        # record the transformation as an "edit" command.
+        if state.is_edit_mode and gesture != "FiveFingers" and state.edit_start_pos is not None:
+            before_canvas = state.initial_canvas.copy()
+            before_marker = state.initial_marker_canvas.copy()
+            after_canvas = imgCanvas.copy()
+            after_marker = imgMarkerCanvas.copy()
+            
+            edit_command = Command(
+                action='edit',
+                before_canvas=before_canvas,
+                before_marker=before_marker,
+                after_canvas=after_canvas,
+                after_marker=after_marker
+            )
+            
+            # Check if this edit is equivalent to any command in the redo stack
+            matching_command = None
+            for cmd in state.redo_stack[::-1]:  # Search from most recent to oldest
+                if cmd.is_equivalent(edit_command):
+                    matching_command = cmd
+                    break
+            
+            if matching_command:
+                # If this is a redo of a previous transformation, use it
+                state.commands.append(matching_command)
+                state.command_index += 1
+                state.undo_stack.append(matching_command)
+                state.redo_stack.remove(matching_command)
+            else:
+                # This is a new transformation, clear redo stack
+                state.redo_stack.clear()
+                state.commands.append(edit_command)
+                state.command_index += 1
+                state.undo_stack.append(edit_command)
+
+            # Reset edit state variables
+            state.is_edit_mode = False
+            state.edit_start_pos = None
+            state.initial_canvas = None
+            state.initial_marker_canvas = None
+            state.edit_initial_distance = None
+            state.last_delta = None
+            state.last_scale = 1.0
 
     # Combine the canvas with the live feed
     imgGray = cv2.cvtColor(imgCanvas, cv2.COLOR_BGR2GRAY)
@@ -963,18 +1108,9 @@ while True:
     elif key == ord('c'):
         clear_canvas()
     elif key == ord('z'):
-        if state.command_index >= 0:
-            state.command_index -= 1
-            redraw_canvas()
-        else:
-            print("Nothing to undo.")
+        undo_action()  # Use our new undo function
     elif key == ord('y'):
-        if state.command_index < len(state.commands) - 1:
-            state.command_index += 1
-            state.commands[state.command_index].execute(imgCanvas, imgMarkerCanvas)
-            redraw_canvas()
-        else:
-            print("Nothing to redo.")
+        redo_action()  # Use our new redo function
 
 # Clean up
 cap.release()

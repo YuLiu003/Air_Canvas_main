@@ -1,5 +1,7 @@
 # Digital_Canvas
 
+![image](https://github.com/user-attachments/assets/436f53dc-0371-4c20-8474-c2298dce3406)
+![image](https://github.com/user-attachments/assets/4c299a01-a0c6-42ec-b423-834e6a04da7e)
 
 Install the following libraries by running
 ```bash

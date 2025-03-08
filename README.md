@@ -52,3 +52,37 @@ Thumb with index finger (pinch): Pause temporary
 Pinky to thumb (lasso): Select an area to transform
 5 finger (transformation): To scale, enlarge or minimalize canvas or lasso
 ```
+
+## Running with Docker
+
+### Build the Docker Image
+```bash
+# Navigate to the project directory
+cd /path/to/Air_Canvas_main
+
+# Build the Docker image
+docker build -t air-canvas .
+
+# Install XQuartz if you don't have it
+brew install --cask xquartz
+
+# Allow X11 connections
+xhost +localhost
+
+# Run the container with display forwarding
+docker run -it --rm \
+  -e DISPLAY=host.docker.internal:0 \
+  --device=/dev/video0:/dev/video0 \
+  --volume="$HOME/.Xauthority:/root/.Xauthority:rw" \
+  air-canvas
+
+
+ # Allow X11 connections
+xhost +local:docker
+
+# Run the container with display forwarding
+docker run -it --rm \
+  -e DISPLAY=$DISPLAY \
+  --device=/dev/video0:/dev/video0 \
+  --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
+  air-canvas 
